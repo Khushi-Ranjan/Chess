@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Chess — Full rules + Flip + Anim + Sound + Clocks + PGN</title>
+<style>
+  :root{
+    --cream:#f1efe3; --green:#6b8b59; --accent:#3563a6; --bg:#f6f8fb;
+    --panel:#ffffff; --muted:#6b7280;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:linear-gradient(#f6f8fb,#eef2f7);font-family:Inter,system-ui,Arial}
+  .app{max-width:1200px;margin:18px auto;padding:12px;display:grid;grid-template-columns:1fr 340px;gap:18px;align-items:start}
+  .board-wrap{background:var(--panel);padding:14px;border-radius:12px;box-shadow:0 8px 30px rgba(16,24,40,.06)}
+  .board { width: 560px; height: 560px; display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8,1fr); border-radius:8px; overflow:visible; position:relative; transition: transform .45s ease; }
+  .square { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; user-select:none; }
+  .light{ background: var(--cream); }
+  .dark{ background: var(--green); }
+  .coord-file, .coord-rank { position:absolute; font-size:12px; color:rgba(0,0,0,.45); }
+  .coord-file { left:6px; bottom:6px; }
+  .coord-rank { right:6px; top:6px; }
+  .piece { width:68px; height:68px; display:grid; place-items:center; border-radius:8px; cursor:grab; position:relative; z-index:5; transition: transform .22s cubic-bezier(.2,.9,.3,1), opacity .15s ease; will-change: transform; }
+  .piece.dragging{ opacity:.6; transform: scale(.96); }
+  .highlight-sel::after{ content:""; position:absolute; inset:6px; border-radius:8px; outline:3px solid rgba(53,99,166,.12); }
+  .highlight-move{ box-shadow: inset 0 0 0 6px rgba(53,99,166,.14); }
+  .highlight-capture{ box-shadow: inset 0 0 0 6px rgba(220,53,69,.18); }
+
+  /* animations overlay for sliding pieces */
+  .anim-layer { position:absolute; inset:0; pointer-events:none; }
+
+  /* right panel */
+  .side{ background:var(--panel); padding:14px; border-radius:12px; box-shadow:0 8px 30px rgba(16,24,40,.06) }
+  .row{ display:flex; gap:8px; align-items:center; justify-content:space-between; }
+  button.btn{ border:0; padding:8px 12px; border-radius:10px; background:#eaf2ff; color:#0b3a66; font-weight:600; cursor:pointer }
+  button.ghost{ background:#f3f4f6; color:#111 }
+  .status{ font-size:14px; color:var(--muted) }
+  .moves{ margin-top:12px; max-height:320px; overflow:auto; background:#0f172a10; padding:8px; border-radius:8px; font-family:ui-monospace,monospace; font-size:13px }
+  .clock{ display:flex; gap:8px; align-items:center; justify-content:space-between; padding:8px; border-radius:8px; background:#f8fafc; margin-top:8px; font-weight:700 }
+  input[type="number"]{ width:70px; padding:6px; border-radius:8px; border:1px solid #e5e7eb; }
+
+  /* promotion modal */
+  .overlay{ position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(2,6,23,.45); z-index:60 }
+  .promo{ background:white;padding:12px;border-radius:12px; display:flex; gap:8px }
+  .promo .opt{ padding:8px 12px; border-radius:8px; border:1px solid #e6eefc; cursor:pointer; font-weight:700 }
+
+  /* responsive */
+  @media (max-width:980px){ .app{ grid-template-columns: 1fr } .board{ width:90vw; height:90vw } }
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="board-wrap">
+      <div id="board" class="board" role="grid" aria-label="Chessboard"></div>
+      <div class="anim-layer" id="animLayer"></div>
+    </div>
+
+    <div class="side">
+      <div class="row">
+        <div style="font-weight:800;font-size:18px">Browser Chess — Full</div>
+        <div class="status" id="gameStatus">Ready</div>
+      </div>
+
+      <div style="margin-top:12px" class="row">
+        <div>
+          <button id="newBtn" class="btn">New Game</button>
+          <button id="undoBtn" class="btn ghost">Undo</button>
+          <button id="flipBtn" class="btn ghost">Flip</button>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <label style="font-size:13px;color:var(--muted)">Start time (mins):</label>
+        <input id="startTime" type="number" value="10" min="1" max="180"/>
+        <button id="setClock" class="btn ghost">Set</button>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="clock"><div>White</div><div id="whiteClock">10:00</div></div>
+        <div class="clock" style="margin-top:8px"><div>Black</div><div id="blackClock">10:00</div></div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="startStopClock" class="btn">Start</button>
+          <button id="pauseClock" class="btn ghost">Pause</button>
+          <button id="resetClock" class="btn ghost">Reset</button>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div style="font-weight:700;margin-bottom:6px">Moves</div>
+        <div class="moves" id="moveList"></div>
+      </div>
+
+      <div style="margin-top:12px; font-size:13px; color:var(--muted)">
+        Controls: Drag piece, drop on legal square. Flip rotates board and coordinates. Timers run while game in progress.
+      </div>
+    </div>
+  </div>
+
+  <!-- Promotion modal -->
+  <div id="promoOverlay" class="overlay" role="dialog" aria-modal="true">
+    <div class="promo" role="document">
+      <div class="opt" data-piece="Q">Queen ♕</div>
+      <div class="opt" data-piece="R">Rook ♖</div>
+      <div class="opt" data-piece="B">Bishop ♗</div>
+      <div class="opt" data-piece="N">Knight ♘</div>
+    </div>
+  </div>
+
+<script>
+/* ========== Full engine + UI ========== */
+
+/* Utilities */
+const $ = id => document.getElementById(id);
+const boardEl = $('board');
+const animLayer = $('animLayer');
+const moveListEl = $('moveList');
+const gameStatus = $('gameStatus');
+
+let startMinutes = Number($('startTime').value) || 10;
+
+/* Audio: simple sounds via WebAudio */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function beep(freq=440, dur=0.06, type='sine', gain=0.08){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.value = gain;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  o.stop(audioCtx.currentTime + dur);
+}
+
+/* Move / capture / check / mate / promo cues */
+function playMove(){ beep(880,0.03,'sine',0.04); }
+function playCapture(){ beep(220,0.07,'sawtooth',0.08); }
+function playCheck(){ beep(1200,0.08,'square',0.09); }
+function playMate(){ beep(240,0.12,'sine',0.12); }
+function playPromo(){ beep(1500,0.12,'triangle',0.12); }
+
+/* Board state: 8x8 array with codes like 'wP','bK' */
+const initialBoard = [
+  ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+  ['bP','bP','bP','bP','bP','bP','bP','bP'],
+  [null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null],
+  [null,null,null,null,null,null,null,null],
+  ['wP','wP','wP','wP','wP','wP','wP','wP'],
+  ['wR','wN','wB','wQ','wK','wB','wN','wR']
+];
+
+let board = initialBoard;
+let whiteToMove = true;
+let castling = { wK:true, wQ:true, bK:true, bQ:true };
+let enPassant = null; // {r,c} square where en-passant capture lands
+let moveHistory = []; // stack of moves for undo
+let moveNotation = []; // moves for PGN
+let flipped = false;
+
+/* Clocks */
+let whiteSeconds = startMinutes*60;
+let blackSeconds = startMinutes*60;
+let clockTimer = null;
+let clocksRunning = false;
+
+/* UI helpers for mapping displayed DOM square -> board coords with flip support.
+   The board DOM is always created row-major top-to-bottom 0..7.
+   If `flipped` is true, display is rotated 180deg; logical board coordinates must be mapped accordingly.
+*/
+function domToBoard(r,c){
+  if(!flipped) return {r,c};
+  return { r: 7 - r, c: 7 - c };
+}
+function boardToDom(r,c){
+  if(!flipped) return {r,c};
+  return { r: 7 - r, c: 7 - c };
+}
+
+/* Chess piece Unicode symbol mapping */
+const PIECE_SYMBOLS = {
+  wK: '♔', // White King
+  wQ: '♕', // White Queen
+  wR: '♖', // White Rook
+  wB: '♗', // White Bishop
+  wN: '♘', // White Knight
+  wP: '♙', // White Pawn
+  bK: '♚', // Black King
+  bQ: '♛', // Black Queen
+  bR: '♜', // Black Rook
+  bB: '♝', // Black Bishop
+  bN: '♞', // Black Knight
+  bP: '♟', // Black Pawn
+};
+
+// Function to render a piece symbol
+function pieceSymbol(code) {
+  if (!code) return '';
+  // Optionally style color and size
+  const color = code[0] === 'w' ? '#c4920b' : '#222';
+  return `<span style="font-size:48px; color:${color};">${PIECE_SYMBOLS[code] || ''}</span>`;
+}
+
+/* Render board squares, pieces, coordinates */
+function render(){
+  boardEl.innerHTML = '';
+  // ensure board rotation CSS transform is applied for visual flip
+  boardEl.style.transform = flipped ? 'rotate(180deg)' : 'rotate(0deg)';
+  // create squares DOM row-major top-to-bottom (0..7)
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const sq = document.createElement('div');
+      sq.className = 'square '+(((r+c)%2===0)? 'light' : 'dark');
+      // coordinate labels (files/ranks)
+      const coordFile = document.createElement('div'); coordFile.className='coord-file';
+      const coordRank = document.createElement('div'); coordRank.className='coord-rank';
+      // compute logical board coords for this DOM square
+      const b = domToBoard(r,c);
+      const file = 'abcdefgh'[b.c];
+      const rank = 8 - b.r;
+      coordFile.textContent = file; coordRank.textContent = rank;
+      // rotate labels when board rotated so they remain readable
+      coordFile.style.transform = flipped ? 'rotate(180deg)' : 'none';
+      coordRank.style.transform = flipped ? 'rotate(180deg)' : 'none';
+      sq.appendChild(coordFile);
+      sq.appendChild(coordRank);
+
+      // piece at logical coords
+      const p = board[b.r][b.c];
+      if(p){
+        const div = document.createElement('div');
+        div.className = 'piece';
+        div.draggable = true;
+        div.dataset.r = b.r; div.dataset.c = b.c; div.dataset.p = p;
+        div.innerHTML = pieceSymbol(p);
+        // event handlers (drag/drop)
+        div.addEventListener('dragstart', onDragStart);
+        div.addEventListener('dragend', onDragEnd);
+        sq.appendChild(div);
+      }
+      // allow drop on square
+      sq.addEventListener('dragover', onDragOver);
+      sq.addEventListener('drop', onDrop);
+      // click fallback
+      sq.addEventListener('click', onSquareClick);
+      boardEl.appendChild(sq);
+    }
+  }
+  updateMoveListUI();
+  updateClocksUI();
+}
+
+/* Animation helper: animate a piece sliding from source DOM rect to target DOM rect */
+function animatePieceSlide(pieceEl, fromRect, toRect, callback){
+  // create a clone in animLayer and absolutely position it
+  const clone = pieceEl.cloneNode(true);
+  clone.style.position = 'absolute';
+  clone.style.left = (fromRect.left - animLayer.getBoundingClientRect().left) + 'px';
+  clone.style.top = (fromRect.top - animLayer.getBoundingClientRect().top) + 'px';
+  clone.style.width = fromRect.width + 'px';
+  clone.style.height = fromRect.height + 'px';
+  clone.style.margin = '0';
+  clone.style.transition = 'transform .28s cubic-bezier(.2,.9,.3,1), opacity .18s';
+  animLayer.appendChild(clone);
+  // compute delta
+  const dx = (toRect.left - fromRect.left);
+  const dy = (toRect.top - fromRect.top);
+  requestAnimationFrame(()=> {
+    clone.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+  // cleanup after transition
+  clone.addEventListener('transitionend', ()=>{ animLayer.removeChild(clone); if(callback) callback(); }, {once:true});
+}
+
+/* ========== Drag & Drop logic (with flip awareness) ========== */
+let draggedEl = null;
+let dragSource = null; // {r,c}
+function onDragStart(e){
+  // ensure audio context resumed on user gesture
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  const el = e.currentTarget;
+  draggedEl = el;
+  dragSource = { r: Number(el.dataset.r), c: Number(el.dataset.c) };
+  el.classList.add('dragging');
+  // highlight legal targets on UI
+  highlightLegal(dragSource.r, dragSource.c);
+}
+function onDragEnd(e){
+  if(draggedEl) draggedEl.classList.remove('dragging');
+  draggedEl = null; dragSource = null; clearHighlights();
+}
+function onDragOver(e){ e.preventDefault(); }
+function onDrop(e){
+  e.preventDefault();
+  const sqEl = e.currentTarget;
+  // compute DOM coords of square
+  const domIndex = Array.from(boardEl.children).indexOf(sqEl);
+  const domR = Math.floor(domIndex/8);
+  const domC = domIndex%8;
+  const target = domToBoard(domR, domC);
+  if(!dragSource) return;
+  handleMove(dragSource.r, dragSource.c, target.r, target.c);
+  // cleanup
+  if(draggedEl) draggedEl.classList.remove('dragging');
+  draggedEl = null; dragSource = null; clearHighlights();
+}
+
+/* Click select fallback for mobile */
+let selected = null;
+function onSquareClick(e){
+  const sqEl = e.currentTarget;
+  const domIndex = Array.from(boardEl.children).indexOf(sqEl);
+  const domR = Math.floor(domIndex/8), domC = domIndex%8;
+  const b = domToBoard(domR, domC);
+  const p = board[b.r][b.c];
+  if(selected){
+    // attempt move
+    if(selected.r===b.r && selected.c===b.c){ selected=null; clearHighlights(); return; }
+    handleMove(selected.r, selected.c, b.r, b.c);
+    selected = null; clearHighlights();
+  } else {
+    if(p && (p[0]===(whiteToMove? 'w':'b'))){
+      selected = {r:b.r,c:b.c};
+      highlightLegal(b.r,b.c);
+    }
+  }
+}
+
+/* Highlight helpers */
+function clearHighlights(){
+  boardEl.querySelectorAll('.square').forEach(s=> s.classList.remove('highlight-sel','highlight-move','highlight-capture'));
+}
+function highlightLegal(r,c){
+  clearHighlights();
+  // find DOM square index for (r,c)
+  const dom = boardToDom(r,c);
+  const idx = dom.r*8 + dom.c;
+  const squares = Array.from(boardEl.children);
+  if(squares[idx]) squares[idx].classList.add('highlight-sel');
+  const list = generateLegalMovesForSquare(r,c);
+  for(const t of list){
+    const d = boardToDom(t.r,t.c);
+    const i = d.r*8 + d.c;
+    if(board[t.r][t.c]) squares[i].classList.add('highlight-capture'); else squares[i].classList.add('highlight-move');
+  }
+}
+
+/* ========== Rules engine (full) ========== */
+function inside(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function colorOf(code){ return code ? code[0] : null; }
+function typeOf(code){ return code ? code[1] : null; }
+
+function generateAllLegalMoves(side){
+  const moves = [];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = board[r][c]; if(!p || colorOf(p)!==side) continue;
+    const list = generatePseudoMoves(r,c,true);
+    for(const m of list) if(moveLeavesKingSafe(r,c,m.r,m.c,m.opts)) moves.push({sr:r,sc:c,er:m.r,ec:m.c,opts:m.opts});
+  }
+  return moves;
+}
+function generateLegalMovesForSquare(r,c){
+  const list = generatePseudoMoves(r,c,true);
+  const out=[];
+  for(const m of list) if(moveLeavesKingSafe(r,c,m.r,m.c,m.opts)) out.push(m);
+  return out;
+}
+
+function generatePseudoMoves(r,c, includeSpecial){
+  const p = board[r][c]; if(!p) return []; const side = colorOf(p); const t = typeOf(p);
+  const moves=[]; const dir = side==='w'? -1:1; const enemy = side==='w'? 'b':'w';
+  if(t==='P'){
+    const r1=r+dir;
+    if(inside(r1,c) && !board[r1][c]){
+      if((side==='w' && r1===0) || (side==='b' && r1===7)) moves.push({r:r1,c,opts:{promote:true}});
+      else moves.push({r:r1,c,opts:{}});
+      const startRow = side==='w'?6:1; const r2=r+2*dir;
+      if(r===startRow && !board[r2]?.[c] && !board[r1][c]) moves.push({r:r2,c,opts:{double:true}});
+    }
+    for(const dc of [-1,1]){
+      const rr=r+dir, cc=c+dc;
+      if(inside(rr,cc) && board[rr][cc] && colorOf(board[rr][cc])===enemy){
+        if((side==='w' && rr===0) || (side==='b' && rr===7)) moves.push({r:rr,c:cc,opts:{promote:true}});
+        else moves.push({r:rr,c:cc,opts:{}});
+      }
+    }
+    if(enPassant){
+      if(enPassant.r===r+dir && Math.abs(enPassant.c - c)===1 && includeSpecial) moves.push({r:enPassant.r,c:enPassant.c,opts:{enpassant:true}});
+    }
+  } else if(t==='N'){
+    const jumps=[[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    for(const [dr,dc] of jumps){ const rr=r+dr, cc=c+dc; if(!inside(rr,cc)) continue; if(!board[rr][cc] || colorOf(board[rr][cc])===enemy) moves.push({r:rr,c:cc,opts:{}}); }
+  } else if(t==='B' || t==='R' || t==='Q'){
+    const dirs=[];
+    if(t==='B' || t==='Q') dirs.push([-1,-1],[-1,1],[1,-1],[1,1]);
+    if(t==='R' || t==='Q') dirs.push([-1,0],[1,0],[0,-1],[0,1]);
+    for(const [dr,dc] of dirs){
+      let rr=r+dr, cc=c+dc;
+      while(inside(rr,cc)){
+        if(!board[rr][cc]) moves.push({r:rr,c:cc,opts:{}});
+        else { if(colorOf(board[rr][cc])===enemy) moves.push({r:rr,c:cc,opts:{}}); break; }
+        rr+=dr; cc+=dc;
+      }
+    }
+  } else if(t==='K'){
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(dr===0&&dc===0) continue; const rr=r+dr, cc=c+dc; if(!inside(rr,cc)) continue; if(!board[rr][cc] || colorOf(board[rr][cc])===enemy) moves.push({r:rr,c:cc,opts:{}});
+    }
+    if(includeSpecial){
+      if(side==='w' && r===7 && c===4){
+        if(castling.wK && !board[7][5] && !board[7][6] && !isSquareAttacked(7,4,'b') && !isSquareAttacked(7,5,'b') && !isSquareAttacked(7,6,'b')) moves.push({r:7,c:6,opts:{castle:'K'}});
+        if(castling.wQ && !board[7][3] && !board[7][2] && !board[7][1] && !isSquareAttacked(7,4,'b') && !isSquareAttacked(7,3,'b') && !isSquareAttacked(7,2,'b')) moves.push({r:7,c:2,opts:{castle:'Q'}});
+      }
+      if(side==='b' && r===0 && c===4){
+        if(castling.bK && !board[0][5] && !board[0][6] && !isSquareAttacked(0,4,'w') && !isSquareAttacked(0,5,'w') && !isSquareAttacked(0,6,'w')) moves.push({r:0,c:6,opts:{castle:'K'}});
+        if(castling.bQ && !board[0][3] && !board[0][2] && !board[0][1] && !isSquareAttacked(0,4,'w') && !isSquareAttacked(0,3,'w') && !isSquareAttacked(0,2,'w')) moves.push({r:0,c:2,opts:{castle:'Q'}});
+      }
+    }
+  }
+  return moves;
+}
+
+function snapshot(){ return { board: board.map(r=>r.slice()), whiteToMove, castling:{...castling}, enPassant: enPassant? {...enPassant}:null, moveHistory: moveHistory.slice(), moveNotation: moveNotation.slice() }; }
+function restore(s){ board = s.board.map(r=>r.slice()); whiteToMove = s.whiteToMove; castling = {...s.castling}; enPassant = s.enPassant? {...s.enPassant}:null; moveHistory = s.moveHistory.slice(); moveNotation = s.moveNotation.slice(); render(); updateGameStatus('Undo'); }
+
+function findKing(side){ for(let r=0;r<8;r++) for(let c=0;c<8;c++) if(board[r][c]===side+'K') return {r,c}; return {r:-1,c:-1}; }
+
+function isSquareAttacked(r,c,bySide){
+  for(let rr=0;rr<8;rr++) for(let cc=0;cc<8;cc++){
+    const p = board[rr][cc]; if(!p || colorOf(p)!==bySide) continue;
+    const t = typeOf(p); const dir = bySide==='w'? -1:1;
+    if(t==='P'){ if(rr+dir===r && Math.abs(cc-c)===1) return true; }
+    else if(t==='N'){ const jumps=[[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]; for(const [dr,dc] of jumps) if(rr+dr===r && cc+dc===c) return true; }
+    else if(t==='B' || t==='R' || t==='Q'){
+      const dirs=[]; if(t==='B'||t==='Q') dirs.push([-1,-1],[-1,1],[1,-1],[1,1]); if(t==='R'||t==='Q') dirs.push([-1,0],[1,0],[0,-1],[0,1]);
+      for(const [dr,dc] of dirs){ let r2=rr+dr,c2=cc+dc; while(inside(r2,c2)){ if(r2===r && c2===c) return true; if(board[r2][c2]) break; r2+=dr; c2+=dc; } }
+    } else if(t==='K'){ for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++) if(!(dr===0&&dc===0) && rr+dr===r && cc+dc===c) return true; }
+  }
+  return false;
+}
+
+function moveLeavesKingSafe(sr,sc,er,ec,opts={}){
+  const snap = snapshot();
+  internalMakeMove(sr,sc,er,ec,opts,false);
+  const k = findKing( whiteToMove ? 'w':'b' );
+  const safe = !isSquareAttacked(k.r,k.c, whiteToMove ? 'b':'w');
+  restore(snap); return safe;
+}
+
+function internalMakeMove(sr,sc,er,ec,opts={},record=true){
+  const side = whiteToMove ? 'w':'b';
+  const piece = board[sr][sc];
+  const captured = opts.enpassant ? board[sr][ec] : board[er][ec];
+  const prev = snapshot();
+  enPassant = null;
+  // move piece
+  board[sr][sc] = null; board[er][ec] = piece;
+  if(opts.enpassant) board[sr][ec] = null;
+  if(opts.double) enPassant = { r:(sr+er)/2, c:ec };
+  if(opts.castle==='K'){ if(side==='w'){ board[7][7]=null; board[7][5]='wR'; } else { board[0][7]=null; board[0][5]='bR'; } }
+  if(opts.castle==='Q'){ if(side==='w'){ board[7][0]=null; board[7][3]='wR'; } else { board[0][0]=null; board[0][3]='bR'; } }
+  if(opts.promote) board[er][ec] = side + (opts.promote || 'Q');
+  // update castling rights
+  if(piece==='wK'){ castling.wK=castling.wQ=false; }
+  if(piece==='bK'){ castling.bK=castling.bQ=false; }
+  if(piece==='wR'){ if(sr===7 && sc===0) castling.wQ=false; if(sr===7 && sc===7) castling.wK=false; }
+  if(piece==='bR'){ if(sr===0 && sc===0) castling.bQ=false; if(sr===0 && sc===7) castling.bK=false; }
+  if(captured==='wR'){ if(er===7 && ec===0) castling.wQ=false; if(er===7 && ec===7) castling.wK=false; }
+  if(captured==='bR'){ if(er===0 && ec===0) castling.bQ=false; if(er===0 && ec===7) castling.bK=false; }
+
+  whiteToMove = !whiteToMove;
+
+  if(record) moveHistory.push({ prev, move:{sr,sc,er,ec,opts,captured} });
+  return { captured, pieceMoved: piece };
+}
+
+/* Make a move from logical coordinates; this handles animation & sound & promotion modal & notation */
+function handleMove(sr,sc,er,ec){
+  // find piece DOM element at sr,sc (via boardToDom mapping)
+  const domFrom = boardToDom(sr,sc);
+  const domTo = boardToDom(er,ec);
+  const fromIdx = domFrom.r*8 + domFrom.c;
+  const toIdx = domTo.r*8 + domTo.c;
+  const squares = Array.from(boardEl.children);
+  const fromSq = squares[fromIdx];
+  const toSq = squares[toIdx];
+  const pieceEl = fromSq.querySelector('.piece');
+
+  const legal = generateLegalMovesForSquare(sr,sc).some(m=> m.r===er && m.c===ec);
+  if(!legal){ updateGameStatus('Illegal move'); beepIllegal(); return; }
+
+  // prepare animation rectangles if piece exists
+  let fromRect, toRect;
+  if(pieceEl){
+    fromRect = pieceEl.getBoundingClientRect();
+    toRect = toSq.getBoundingClientRect();
+  }
+
+  // check special opts
+  const movelist = generateLegalMovesForSquare(sr,sc);
+  const chosen = movelist.find(m=> m.r===er && m.c===ec);
+  const opts = chosen ? chosen.opts : {};
+
+  // play sounds appropriately (capture vs move)
+  const captured = board[er][ec] || (opts.enpassant ? board[sr][ec] : null);
+
+  // if promotion required, show modal and proceed inside callback
+  if(opts.promote){
+    // show promotion modal and wait
+    showPromotionModal((choice)=>{
+      opts.promote = choice;
+      // do internal move then animate
+      const res = internalMakeMove(sr,sc,er,ec,opts,true);
+      // animate: clone piece and slide
+      if(pieceEl && fromRect && toRect) animatePieceSlide(pieceEl, fromRect, toRect, ()=>{
+        // re-render after animation
+        render();
+        postMoveActions(res,captured,opts);
+      });
+      else { render(); postMoveActions(res,captured,opts); }
+    });
+    return;
+  }
+
+  // perform move
+  const res = internalMakeMove(sr,sc,er,ec,opts,true);
+
+  // animate: if we have pieceEl and DOM rects
+  if(pieceEl && fromRect && toRect){
+    animatePieceSlide(pieceEl, fromRect, toRect, ()=>{
+      render();
+      postMoveActions(res,captured,opts);
+    });
+  } else {
+    render();
+    postMoveActions(res,captured,opts);
+  }
+}
+
+function postMoveActions(result,captured,opts){
+  // sounds
+  if(captured) playCapture(); else playMove();
+  if(isKingInCheck(whiteToMove ? 'w':'b')){ playCheck(); updateGameStatus('Check'); }
+  // add move notation
+  addMoveNotation(result.move ? result.move : null, opts, captured);
+  // clocks: switch active player
+  switchActiveClock();
+  // check game end
+  checkGameEnd();
+}
+
+/* small utility beep for illegal moves */
+function beepIllegal(){ beep(260,0.08,'sine',0.09); }
+
+/* Promotion modal */
+function showPromotionModal(cb){
+  const overlay = $('promoOverlay');
+  overlay.style.display = 'flex';
+  const opts = overlay.querySelectorAll('.opt');
+  const handler = (e) => {
+    const piece = e.currentTarget.dataset.piece;
+    opts.forEach(o=>o.removeEventListener('click', handler));
+    overlay.style.display = 'none';
+    playPromo();
+    cb(piece);
+  };
+  opts.forEach(o=>o.addEventListener('click', handler));
+}
+
+/* move notation: basic algebraic-ish (not disambiguating) */
+function algebraic(r,c){ return 'abcdefgh'[c] + (8-r); }
+function addMoveNotation(lastMove, opts, captured){
+  // build string for last move (we can produce simple SAN)
+  const last = moveHistory[moveHistory.length-1].move;
+  const piece = board[last.er][last.ec];
+  const pType = lastMove ? lastMove.pieceMoved ? lastMove.pieceMoved[1] : (piece? piece[1] : '') : (piece? piece[1] : '');
+  let text = '';
+  if(opts && opts.castle==='K') text = 'O-O';
+  else if(opts && opts.castle==='Q') text = 'O-O-O';
+  else {
+    if(pType && pType!=='P') text += pType;
+    if(captured) text += 'x';
+    text += algebraic(last.er,last.ec);
+    if(opts && opts.promote) text += '=' + opts.promote;
+  }
+  // check or mate
+  const their = whiteToMove ? 'w' : 'b';
+  const ksq = findKing(their);
+  const inCheck = isSquareAttacked(ksq.r, ksq.c, whiteToMove ? 'b':'w');
+  const theirMoves = generateAllLegalMoves(their);
+  if(inCheck && theirMoves.length===0) text += '#';
+  else if(inCheck) text += '+';
+  moveNotation.push(text);
+
+  // update UI move list in pairs
+  updateMoveListUI();
+}
+
+/* update move list UI */
+function updateMoveListUI(){
+  moveListEl.innerHTML = '';
+  for(let i=0;i<moveNotation.length;i+=2){
+    const num = Math.floor(i/2)+1;
+    const w = moveNotation[i] || '';
+    const b = moveNotation[i+1] || '';
+    const row = document.createElement('div');
+    row.textContent = `${num}. ${w} ${b}`;
+    moveListEl.appendChild(row);
+  }
+}
+
+/* check king in check for UI */
+function isKingInCheck(side){
+  const k = findKing(side);
+  return isSquareAttacked(k.r,k.c, side==='w' ? 'b':'w');
+}
+
+/* check game end */
+function checkGameEnd(){
+  const side = whiteToMove ? 'w':'b';
+  const moves = generateAllLegalMoves(side);
+  const ksq = findKing(side);
+  const inCheck = isSquareAttacked(ksq.r, ksq.c, whiteToMove ? 'b':'w');
+  if(moves.length===0){
+    if(inCheck){ updateGameStatus((whiteToMove?'White':'Black') + ' is checkmated. ' + (!whiteToMove? 'White':'Black') + ' wins!'); playMate(); disableBoard(); }
+    else { updateGameStatus('Stalemate. Draw.'); disableBoard(); }
+  } else {
+    updateGameStatus('Ready');
+  }
+}
+
+function disableBoard(){ boardEl.querySelectorAll('.piece').forEach(p=>p.draggable=false); }
+function updateGameStatus(text){ gameStatus.textContent = text; }
+
+/* ========== Clocks ========== */
+function formatTime(sec){
+  const m = Math.floor(sec/60), s = sec%60;
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+function updateClocksUI(){
+  $('whiteClock').textContent = formatTime(whiteSeconds);
+  $('blackClock').textContent = formatTime(blackSeconds);
+}
+
+function switchActiveClock(){
+  // on every move, stop previous and start other
+  if(clocksRunning){
+    // toggle active by whiteToMove (which was toggled already in internalMakeMove)
+    // so after a move, the new side to move is whiteToMove; the clock running should be for that side.
+    // We will clear and restart interval accordingly.
+    restartClockInterval();
+  }
+}
+
+function startClocks(){
+  if(clockTimer) clearInterval(clockTimer);
+  clocksRunning = true;
+  clockTimer = setInterval(()=>{
+    if(whiteToMove){ whiteSeconds--; if(whiteSeconds<=0){ whiteSeconds=0; clearInterval(clockTimer); clocksRunning=false; updateGameStatus('White timed out'); }} 
+    else { blackSeconds--; if(blackSeconds<=0){ blackSeconds=0; clearInterval(clockTimer); clocksRunning=false; updateGameStatus('Black timed out'); }}
+    updateClocksUI();
+  }, 1000);
+}
+function pauseClocks(){ if(clockTimer) clearInterval(clockTimer); clocksRunning=false; clockTimer=null; }
+function restartClockInterval(){ if(clockTimer) clearInterval(clockTimer); clocksRunning=true; clockTimer = setInterval(()=>{ if(whiteToMove){ whiteSeconds--; if(whiteSeconds<=0){ whiteSeconds=0; clearInterval(clockTimer); clocksRunning=false; updateGameStatus('White timed out'); } } else { blackSeconds--; if(blackSeconds<=0){ blackSeconds=0; clearInterval(clockTimer); clocksRunning=false; updateGameStatus('Black timed out'); } } updateClocksUI(); },1000); }
+
+/* Clock controls */
+$('startStopClock').addEventListener('click', ()=>{
+  if(!clocksRunning){ startClocks(); $('startStopClock').textContent='Running'; } else { pauseClocks(); $('startStopClock').textContent='Start'; }
+});
+$('pauseClock').addEventListener('click', ()=>{ pauseClocks(); $('startStopClock').textContent='Start'; });
+$('resetClock').addEventListener('click', ()=>{ whiteSeconds=startMinutes*60; blackSeconds=startMinutes*60; updateClocksUI(); pauseClocks(); $('startStopClock').textContent='Start'; });
+
+$('setClock').addEventListener('click', ()=>{
+  startMinutes = Number($('startTime').value) || 5;
+  whiteSeconds = startMinutes*60; blackSeconds = startMinutes*60;
+  updateClocksUI();
+});
+
+/* ========== Undo / New / Flip / ========== */
+$('newBtn').addEventListener('click', ()=>{ resetGame(); });
+$('undoBtn').addEventListener('click', ()=>{ const last = moveHistory.pop(); if(!last) return; restore(last.prev); });
+$('flipBtn').addEventListener('click', ()=>{ flipped = !flipped; boardEl.style.transform = flipped ? 'rotate(180deg)' : 'rotate(0)'; render(); });
+/* reset */
+function resetGame(){
+  board = initialBoard;
+  whiteToMove = true; castling = { wK:true, wQ:true, bK:true, bQ:true }; enPassant = null; moveHistory=[]; moveNotation=[]; flipped=false;
+  // reset clocks
+  startMinutes = Number($('startTime').value) || 10;
+  whiteSeconds = startMinutes*60; blackSeconds = startMinutes*60; pauseClocks();
+  $('startStopClock').textContent='Start';
+  render(); updateGameStatus('Ready');
+}
+
+/* ========== Move validation helpers used earlier ========== */
+/* Already implemented above: generatePseudoMoves, generateLegalMovesForSquare, moveLeavesKingSafe, etc. */
+
+/* ========== Boot ========== */
+resetGame();
+render();
+updateClocksUI();
+
+/* Minor: expose some debug helpers */
+window.__chess_state = ()=> ({board, whiteToMove, moveHistory, moveNotation});
+</script>
+</body>
+</html>
